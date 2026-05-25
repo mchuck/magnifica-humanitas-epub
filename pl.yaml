@@ -1,0 +1,27 @@
+lang: pl
+source_url: "https://www.vatican.va/content/leo-xiv/pl/encyclicals/documents/20260515-magnifica-humanitas.html"
+source_html: "vatican-magnifica-humanitas.pl.source.html"
+output_epub: "Magnifica Humanitas - Papież Leon XIV.epub"
+build_dir: "build/magnifica-humanitas-epub-pl"
+
+title: "Magnifica Humanitas"
+full_title: "List Encykliczny Jego Świątobliwości Leona XIV Magnifica Humanitas"
+subtitle: "O ochronie osoby ludzkiej w dobie sztucznej inteligencji"
+author: "Papież Leon XIV"
+publisher: "Stolica Apostolska"
+date: "2026-05-15"
+
+# Vatican HTML parsing
+# intro_anchor: name attribute of the <a> tag that marks the start of the body text.
+# The Polish Vatican page may use a different anchor; inspect the downloaded HTML if
+# the script fails with "Could not find the start of the encyclical body".
+intro_anchor: "WPROWADZENIE_"
+# Regex matched against TOC link text to classify level-1 headings.
+# Adjust if the Polish document uses different section names.
+top_level_pattern: "^(WPROWADZENIE|ROZDZIA[ŁL] [IVX]+|ZAKO[NŃ]CZENIE)$"
+
+# Localised UI strings
+cover_label: "List Encykliczny"
+cover_date: "15 maja 2026"
+toc_title_page: "Strona tytułowa"
+notes_heading: "Przypisy"

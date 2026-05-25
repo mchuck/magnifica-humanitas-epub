@@ -1,0 +1,24 @@
+[project]
+dependencies = []
+name = "magnifica-humanitas-epub"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+magnifica_humanitas_epub = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+python = ">=3.14.5,<3.15"
+lxml = ">=6.1.1,<7"
+pillow = ">=12.2.0,<13"
+pyyaml = ">=6.0.3,<7"

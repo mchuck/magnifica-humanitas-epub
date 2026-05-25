@@ -1,0 +1,24 @@
+lang: en
+source_url: "https://www.vatican.va/content/leo-xiv/en/encyclicals/documents/20260515-magnifica-humanitas.html"
+source_html: "vatican-magnifica-humanitas.en.source.html"
+output_epub: "Magnifica Humanitas - Pope Leo XIV.epub"
+build_dir: "build/magnifica-humanitas-epub-en"
+
+title: "Magnifica Humanitas"
+full_title: "Encyclical Letter of His Holiness Leo XIV Magnifica Humanitas"
+subtitle: "On Safeguarding the Human Person in the Time of Artificial Intelligence"
+author: "Pope Leo XIV"
+publisher: "The Holy See"
+date: "2026-05-15"
+
+# Vatican HTML parsing
+# intro_anchor: name attribute of the <a> tag that marks the start of the body text
+intro_anchor: "INTRODUCTION_"
+# Regex matched against TOC link text to classify level-1 headings (chapters/sections)
+top_level_pattern: "^(INTRODUCTION|CHAPTER [A-Z]+|CONCLUSION)$"
+
+# Localised UI strings
+cover_label: "Encyclical Letter"
+cover_date: "15 May 2026"
+toc_title_page: "Title Page"
+notes_heading: "Notes"

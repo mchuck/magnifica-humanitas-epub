@@ -1,4 +1,9 @@
 build/
-vatican-magnifica-humanitas.source.html
+*.epub
+*.source.html
+__pycache__/
 *.DS_Store
 
+# pixi environments
+.pixi/*
+!.pixi/config.toml

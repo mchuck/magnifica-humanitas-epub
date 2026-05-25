@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import html as html_lib
 import re
 import shutil
@@ -8,26 +9,63 @@ import unicodedata
 import uuid
 import zipfile
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.request import Request, urlopen
 from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
+import yaml
 from lxml import etree, html
 from PIL import Image, ImageDraw, ImageFont
 
 
-SOURCE_URL = "https://www.vatican.va/content/leo-xiv/en/encyclicals/documents/20260515-magnifica-humanitas.html"
-SOURCE_HTML = Path("vatican-magnifica-humanitas.source.html")
-BUILD_DIR = Path("build/magnifica-humanitas-epub")
-OUTPUT_EPUB = Path("Magnifica Humanitas - Pope Leo XIV.epub")
+@dataclass
+class Config:
+    lang: str
+    source_url: str
+    source_html: Path
+    output_epub: Path
+    build_dir: Path
+    title: str
+    full_title: str
+    subtitle: str
+    author: str
+    publisher: str
+    date: str
+    # parsing helpers — may differ by language
+    intro_anchor: str
+    top_level_pattern: str
+    # localised UI strings
+    cover_label: str
+    cover_date: str
+    toc_title_page: str
+    notes_heading: str
 
-TITLE = "Magnifica Humanitas"
-FULL_TITLE = "Encyclical Letter of His Holiness Leo XIV Magnifica Humanitas"
-SUBTITLE = "On Safeguarding the Human Person in the Time of Artificial Intelligence"
-AUTHOR = "Pope Leo XIV"
-PUBLISHER = "The Holy See"
-DATE = "2026-05-15"
-LANG = "en"
+    @classmethod
+    def from_yaml(cls, path: Path) -> "Config":
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return cls(
+            lang=data["lang"],
+            source_url=data["source_url"],
+            source_html=Path(data["source_html"]),
+            output_epub=Path(data["output_epub"]),
+            build_dir=Path(data["build_dir"]),
+            title=data["title"],
+            full_title=data["full_title"],
+            subtitle=data["subtitle"],
+            author=data["author"],
+            publisher=data["publisher"],
+            date=data["date"],
+            intro_anchor=data.get("intro_anchor", "INTRODUCTION_"),
+            top_level_pattern=data.get(
+                "top_level_pattern",
+                r"^(INTRODUCTION|CHAPTER [A-Z]+|CONCLUSION)$",
+            ),
+            cover_label=data.get("cover_label", "ENCYCLICAL LETTER"),
+            cover_date=data.get("cover_date", ""),
+            toc_title_page=data.get("toc_title_page", "Title Page"),
+            notes_heading=data.get("notes_heading", "Notes"),
+        )
 
 
 def normspace(value: str) -> str:
@@ -80,10 +118,12 @@ def build_id_map(content: etree._Element) -> dict[str, str]:
     return ids
 
 
-def extract_toc_levels(content: etree._Element, id_map: dict[str, str]) -> dict[str, int]:
+def extract_toc_levels(content: etree._Element, id_map: dict[str, str], cfg: Config) -> dict[str, int]:
     levels: dict[str, int] = {}
+    top_re = re.compile(cfg.top_level_pattern)
+
     for paragraph in content.xpath("./p"):
-        if paragraph.xpath('.//a[@name="INTRODUCTION_"]'):
+        if paragraph.xpath(f'.//a[@name="{cfg.intro_anchor}"]'):
             break
 
         for anchor in paragraph.xpath('.//a[@href and starts-with(@href, "#")]'):
@@ -96,7 +136,7 @@ def extract_toc_levels(content: etree._Element, id_map: dict[str, str]) -> dict[
             if not text:
                 continue
 
-            if re.match(r"^(INTRODUCTION|CHAPTER [A-Z]+|CONCLUSION)$", text):
+            if top_re.match(text):
                 level = 1
             elif any_ancestor_tag(anchor, "i"):
                 level = 3
@@ -107,7 +147,7 @@ def extract_toc_levels(content: etree._Element, id_map: dict[str, str]) -> dict[
     return levels
 
 
-def sanitize_element(element: etree._Element, id_map: dict[str, str]) -> etree._Element:
+def sanitize_element(element: etree._Element, id_map: dict[str, str], source_url: str) -> etree._Element:
     cleaned = deepcopy(element)
 
     def clean(node: etree._Element) -> None:
@@ -146,7 +186,7 @@ def sanitize_element(element: etree._Element, id_map: dict[str, str]) -> etree._
             if href.startswith("#"):
                 node.set("href", f"#{id_map.get(href[1:], href[1:])}")
             else:
-                node.set("href", urljoin(SOURCE_URL, href).replace("http://www.vatican.va", "https://www.vatican.va"))
+                node.set("href", urljoin(source_url, href).replace("http://www.vatican.va", "https://www.vatican.va"))
 
         if text_align_center and node.tag in {"p", "div"}:
             node.set("class", "center")
@@ -189,15 +229,23 @@ def serialize_element(element: etree._Element) -> str:
     return etree.tostring(element, encoding="unicode", method="xml", with_tail=False)
 
 
-def build_content_fragments(content: etree._Element, id_map: dict[str, str], toc_levels: dict[str, int]) -> tuple[list[str], list[str], list[dict[str, str | int]]]:
+def build_content_fragments(
+    content: etree._Element,
+    id_map: dict[str, str],
+    toc_levels: dict[str, int],
+    cfg: Config,
+) -> tuple[list[str], list[str], list[dict[str, str | int]]]:
     children = list(content)
     start_index = None
     for i, child in enumerate(children):
-        if isinstance(child.tag, str) and child.xpath('.//a[@name="INTRODUCTION_"]'):
+        if isinstance(child.tag, str) and child.xpath(f'.//a[@name="{cfg.intro_anchor}"]'):
             start_index = i
             break
     if start_index is None:
-        raise RuntimeError("Could not find the start of the encyclical body.")
+        raise RuntimeError(
+            f"Could not find the start of the encyclical body (anchor '{cfg.intro_anchor}'). "
+            "Check intro_anchor in your config."
+        )
 
     body: list[str] = []
     notes: list[str] = []
@@ -210,7 +258,7 @@ def build_content_fragments(content: etree._Element, id_map: dict[str, str], toc
         footnote_paragraphs = child.xpath('.//p[contains(concat(" ", normalize-space(@class), " "), " MsoFootnoteText ")]')
         if footnote_paragraphs:
             for paragraph in footnote_paragraphs:
-                cleaned = sanitize_element(paragraph, id_map)
+                cleaned = sanitize_element(paragraph, id_map, cfg.source_url)
                 cleaned.set("class", "footnote")
                 if normspace(cleaned.text_content()):
                     notes.append(serialize_element(cleaned))
@@ -229,7 +277,7 @@ def build_content_fragments(content: etree._Element, id_map: dict[str, str], toc
                 toc_entries.append(toc_entry)
             continue
 
-        cleaned = sanitize_element(child, id_map)
+        cleaned = sanitize_element(child, id_map, cfg.source_url)
         if cleaned.tag.lower() == "p" and not normspace(cleaned.text_content()):
             continue
         body.append(serialize_element(cleaned))
@@ -242,6 +290,8 @@ def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.Im
         "/System/Library/Fonts/Supplemental/Georgia Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Georgia.ttf",
         "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSerif.ttf",
     ]
     for candidate in candidates:
         path = Path(candidate)
@@ -284,7 +334,7 @@ def draw_centered_lines(
     return y
 
 
-def create_cover(path: Path) -> None:
+def create_cover(path: Path, cfg: Config) -> None:
     width, height = 1600, 2400
     image = Image.new("RGB", (width, height), "#f7f1e6")
     draw = ImageDraw.Draw(image)
@@ -297,26 +347,26 @@ def create_cover(path: Path) -> None:
     draw.rectangle((margin + 32, margin + 32, width - margin - 32, height - margin - 32), outline=gold, width=3)
 
     y = 360
-    y = draw_centered_lines(draw, ["ENCYCLICAL LETTER"], font(54), y, graphite, 18, width)
+    y = draw_centered_lines(draw, [cfg.cover_label.upper()], font(54), y, graphite, 18, width)
     y += 120
     y = draw_centered_lines(draw, ["MAGNIFICA", "HUMANITAS"], font(126, bold=True), y, burgundy, 34, width)
     y += 120
-    subtitle_lines = wrap_text(draw, SUBTITLE.upper(), font(48), width - 360)
+    subtitle_lines = wrap_text(draw, cfg.subtitle.upper(), font(48), width - 360)
     y = draw_centered_lines(draw, subtitle_lines, font(48), y, graphite, 22, width)
     y += 190
     draw.line((width // 2 - 210, y, width // 2 + 210, y), fill=gold, width=6)
     y += 110
-    y = draw_centered_lines(draw, [AUTHOR.upper()], font(58, bold=True), y, graphite, 18, width)
+    y = draw_centered_lines(draw, [cfg.author.upper()], font(58, bold=True), y, graphite, 18, width)
     y += 48
-    draw_centered_lines(draw, ["15 MAY 2026"], font(44), y, graphite, 14, width)
+    draw_centered_lines(draw, [cfg.cover_date.upper()], font(44), y, graphite, 14, width)
 
     image.save(path, "PNG", optimize=True)
 
 
-def make_xhtml(title: str, body: str, css_href: str = "../styles/book.css") -> str:
+def make_xhtml(title: str, body: str, lang: str, css_href: str = "../styles/book.css") -> str:
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{LANG}" lang="{LANG}">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
 <head>
   <meta charset="utf-8" />
   <title>{escape(title)}</title>
@@ -360,17 +410,17 @@ def render_nav_tree(entries: list[dict[str, str | int]]) -> str:
     return render(root)
 
 
-def write_epub_files(body_fragments: list[str], notes: list[str], toc_entries: list[dict[str, str | int]]) -> None:
-    if BUILD_DIR.exists():
-        shutil.rmtree(BUILD_DIR)
+def write_epub_files(body_fragments: list[str], notes: list[str], toc_entries: list[dict[str, str | int]], cfg: Config) -> None:
+    if cfg.build_dir.exists():
+        shutil.rmtree(cfg.build_dir)
 
-    (BUILD_DIR / "META-INF").mkdir(parents=True)
-    (BUILD_DIR / "OEBPS" / "text").mkdir(parents=True)
-    (BUILD_DIR / "OEBPS" / "styles").mkdir(parents=True)
-    (BUILD_DIR / "OEBPS" / "images").mkdir(parents=True)
+    (cfg.build_dir / "META-INF").mkdir(parents=True)
+    (cfg.build_dir / "OEBPS" / "text").mkdir(parents=True)
+    (cfg.build_dir / "OEBPS" / "styles").mkdir(parents=True)
+    (cfg.build_dir / "OEBPS" / "images").mkdir(parents=True)
 
-    (BUILD_DIR / "mimetype").write_text("application/epub+zip", encoding="utf-8")
-    (BUILD_DIR / "META-INF" / "container.xml").write_text(
+    (cfg.build_dir / "mimetype").write_text("application/epub+zip", encoding="utf-8")
+    (cfg.build_dir / "META-INF" / "container.xml").write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
@@ -381,7 +431,7 @@ def write_epub_files(body_fragments: list[str], notes: list[str], toc_entries: l
         encoding="utf-8",
     )
 
-    create_cover(BUILD_DIR / "OEBPS" / "images" / "cover.png")
+    create_cover(cfg.build_dir / "OEBPS" / "images" / "cover.png", cfg)
 
     css = """
 body {
@@ -453,28 +503,32 @@ img.cover {
   max-width: 100%;
 }
 """.strip()
-    (BUILD_DIR / "OEBPS" / "styles" / "book.css").write_text(css + "\n", encoding="utf-8")
+    (cfg.build_dir / "OEBPS" / "styles" / "book.css").write_text(css + "\n", encoding="utf-8")
 
-    cover_body = '<section class="cover"><img class="cover" src="../images/cover.png" alt="Cover for Magnifica Humanitas" /></section>'
-    (BUILD_DIR / "OEBPS" / "text" / "cover.xhtml").write_text(make_xhtml("Cover", cover_body), encoding="utf-8")
+    cover_body = f'<section class="cover"><img class="cover" src="../images/cover.png" alt="Cover for {escape(cfg.title)}" /></section>'
+    (cfg.build_dir / "OEBPS" / "text" / "cover.xhtml").write_text(
+        make_xhtml("Cover", cover_body, cfg.lang), encoding="utf-8"
+    )
 
     title_body = f"""
 <section class="title-page">
-  <p>ENCYCLICAL LETTER</p>
-  <h1 class="book-title">{escape(TITLE)}</h1>
-  <p class="subtitle">{escape(SUBTITLE)}</p>
-  <p>{escape(AUTHOR)}</p>
-  <p>{escape(DATE)}</p>
-  <p class="source">Source: <a href="{escape(SOURCE_URL)}">{escape(PUBLISHER)}</a></p>
+  <p>{escape(cfg.cover_label)}</p>
+  <h1 class="book-title">{escape(cfg.title)}</h1>
+  <p class="subtitle">{escape(cfg.subtitle)}</p>
+  <p>{escape(cfg.author)}</p>
+  <p>{escape(cfg.date)}</p>
+  <p class="source">Source: <a href="{escape(cfg.source_url)}">{escape(cfg.publisher)}</a></p>
 </section>
 """.strip()
-    (BUILD_DIR / "OEBPS" / "text" / "title.xhtml").write_text(make_xhtml(TITLE, title_body), encoding="utf-8")
+    (cfg.build_dir / "OEBPS" / "text" / "title.xhtml").write_text(
+        make_xhtml(cfg.title, title_body, cfg.lang), encoding="utf-8"
+    )
 
     notes_section = ""
     if notes:
         notes_section = f"""
 <section id="notes" epub:type="footnotes">
-  <h1>Notes</h1>
+  <h1>{escape(cfg.notes_heading)}</h1>
   {"\n  ".join(notes)}
 </section>
 """.strip()
@@ -485,10 +539,12 @@ img.cover {
 </section>
 {notes_section}
 """.strip()
-    (BUILD_DIR / "OEBPS" / "text" / "content.xhtml").write_text(make_xhtml(TITLE, content_body), encoding="utf-8")
+    (cfg.build_dir / "OEBPS" / "text" / "content.xhtml").write_text(
+        make_xhtml(cfg.title, content_body, cfg.lang), encoding="utf-8"
+    )
 
     nav_entries = [
-        {"href": "text/title.xhtml", "text": "Title Page", "level": 1},
+        {"href": "text/title.xhtml", "text": cfg.toc_title_page, "level": 1},
         *[
             {
                 "href": f'text/content.xhtml#{entry["id"]}',
@@ -499,7 +555,7 @@ img.cover {
         ],
     ]
     if notes:
-        nav_entries.append({"href": "text/content.xhtml#notes", "text": "Notes", "level": 1})
+        nav_entries.append({"href": "text/content.xhtml#notes", "text": cfg.notes_heading, "level": 1})
 
     nav_body = f"""
 <nav epub:type="toc" id="toc">
@@ -507,7 +563,9 @@ img.cover {
   {render_nav_tree(nav_entries)}
 </nav>
 """.strip()
-    (BUILD_DIR / "OEBPS" / "nav.xhtml").write_text(make_xhtml("Contents", nav_body, "styles/book.css"), encoding="utf-8")
+    (cfg.build_dir / "OEBPS" / "nav.xhtml").write_text(
+        make_xhtml("Contents", nav_body, cfg.lang, "styles/book.css"), encoding="utf-8"
+    )
 
     ncx_points = []
     play_order = 1
@@ -520,8 +578,8 @@ img.cover {
         )
         play_order += 1
 
-    identifier = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, SOURCE_URL)}"
-    (BUILD_DIR / "OEBPS" / "toc.ncx").write_text(
+    identifier = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, cfg.source_url)}"
+    (cfg.build_dir / "OEBPS" / "toc.ncx").write_text(
         f"""<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
@@ -530,8 +588,8 @@ img.cover {
     <meta name="dtb:totalPageCount" content="0" />
     <meta name="dtb:maxPageNumber" content="0" />
   </head>
-  <docTitle><text>{escape(TITLE)}</text></docTitle>
-  <docAuthor><text>{escape(AUTHOR)}</text></docAuthor>
+  <docTitle><text>{escape(cfg.title)}</text></docTitle>
+  <docAuthor><text>{escape(cfg.author)}</text></docAuthor>
   <navMap>
 {"\n".join(ncx_points)}
   </navMap>
@@ -540,18 +598,18 @@ img.cover {
         encoding="utf-8",
     )
 
-    (BUILD_DIR / "OEBPS" / "content.opf").write_text(
+    (cfg.build_dir / "OEBPS" / "content.opf").write_text(
         f"""<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="{LANG}">
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="{cfg.lang}">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="bookid">{identifier}</dc:identifier>
-    <dc:title>{escape(TITLE)}</dc:title>
-    <dc:creator>{escape(AUTHOR)}</dc:creator>
-    <dc:language>{LANG}</dc:language>
-    <dc:publisher>{escape(PUBLISHER)}</dc:publisher>
-    <dc:date>{DATE}</dc:date>
-    <dc:source>{escape(SOURCE_URL)}</dc:source>
-    <dc:description>{escape(SUBTITLE)}</dc:description>
+    <dc:title>{escape(cfg.title)}</dc:title>
+    <dc:creator>{escape(cfg.author)}</dc:creator>
+    <dc:language>{cfg.lang}</dc:language>
+    <dc:publisher>{escape(cfg.publisher)}</dc:publisher>
+    <dc:date>{cfg.date}</dc:date>
+    <dc:source>{escape(cfg.source_url)}</dc:source>
+    <dc:description>{escape(cfg.subtitle)}</dc:description>
     <meta property="dcterms:modified">2026-05-25T00:00:00Z</meta>
     <meta name="cover" content="cover-image" />
   </metadata>
@@ -575,54 +633,70 @@ img.cover {
     )
 
 
-def create_epub() -> None:
-    if OUTPUT_EPUB.exists():
-        OUTPUT_EPUB.unlink()
+def create_epub(cfg: Config) -> None:
+    if cfg.output_epub.exists():
+        cfg.output_epub.unlink()
 
-    with zipfile.ZipFile(OUTPUT_EPUB, "w") as epub:
-        epub.write(BUILD_DIR / "mimetype", "mimetype", compress_type=zipfile.ZIP_STORED)
-        for path in sorted(BUILD_DIR.rglob("*")):
+    with zipfile.ZipFile(cfg.output_epub, "w") as epub:
+        epub.write(cfg.build_dir / "mimetype", "mimetype", compress_type=zipfile.ZIP_STORED)
+        for path in sorted(cfg.build_dir.rglob("*")):
             if path.is_dir() or path.name == "mimetype":
                 continue
-            epub.write(path, path.relative_to(BUILD_DIR).as_posix(), compress_type=zipfile.ZIP_DEFLATED)
+            epub.write(path, path.relative_to(cfg.build_dir).as_posix(), compress_type=zipfile.ZIP_DEFLATED)
 
 
-def validate_xml() -> None:
+def validate_xml(cfg: Config) -> None:
     parser = etree.XMLParser(resolve_entities=False, no_network=True)
     for path in [
-        BUILD_DIR / "META-INF" / "container.xml",
-        BUILD_DIR / "OEBPS" / "content.opf",
-        BUILD_DIR / "OEBPS" / "toc.ncx",
-        BUILD_DIR / "OEBPS" / "nav.xhtml",
-        BUILD_DIR / "OEBPS" / "text" / "cover.xhtml",
-        BUILD_DIR / "OEBPS" / "text" / "title.xhtml",
-        BUILD_DIR / "OEBPS" / "text" / "content.xhtml",
+        cfg.build_dir / "META-INF" / "container.xml",
+        cfg.build_dir / "OEBPS" / "content.opf",
+        cfg.build_dir / "OEBPS" / "toc.ncx",
+        cfg.build_dir / "OEBPS" / "nav.xhtml",
+        cfg.build_dir / "OEBPS" / "text" / "cover.xhtml",
+        cfg.build_dir / "OEBPS" / "text" / "title.xhtml",
+        cfg.build_dir / "OEBPS" / "text" / "content.xhtml",
     ]:
         etree.parse(str(path), parser)
 
 
 def main() -> None:
-    if not SOURCE_HTML.exists():
-        request = Request(SOURCE_URL, headers={"User-Agent": "magnifica-humanitas-epub/1.0"})
-        with urlopen(request, timeout=30) as response:
-            SOURCE_HTML.write_bytes(response.read())
+    parser = argparse.ArgumentParser(description="Build an EPUB from a Vatican encyclical page.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("en.yaml"),
+        help="Path to language config YAML (default: en.yaml)",
+    )
+    args = parser.parse_args()
 
-    document = html.parse(str(SOURCE_HTML))
+    cfg = Config.from_yaml(args.config)
+
+    if not cfg.source_html.exists():
+        print(f"Downloading {cfg.source_url} ...")
+        request = Request(cfg.source_url, headers={"User-Agent": "magnifica-humanitas-epub/1.0"})
+        with urlopen(request, timeout=30) as response:
+            cfg.source_html.write_bytes(response.read())
+
+    document = html.parse(str(cfg.source_html))
     root = document.getroot()
-    content_nodes = root.xpath('//*[contains(concat(" ", normalize-space(@class), " "), " documento ")]//*[contains(concat(" ", normalize-space(@class), " "), " vaticanrichtext ") and contains(concat(" ", normalize-space(@class), " "), " text ")][2]')
+    content_nodes = root.xpath(
+        '//*[contains(concat(" ", normalize-space(@class), " "), " documento ")]'
+        '//*[contains(concat(" ", normalize-space(@class), " "), " vaticanrichtext ") '
+        'and contains(concat(" ", normalize-space(@class), " "), " text ")][2]'
+    )
     if not content_nodes:
         raise RuntimeError("Could not find the Vatican document text.")
 
     content = content_nodes[0]
     id_map = build_id_map(content)
-    toc_levels = extract_toc_levels(content, id_map)
-    body_fragments, notes, toc_entries = build_content_fragments(content, id_map, toc_levels)
+    toc_levels = extract_toc_levels(content, id_map, cfg)
+    body_fragments, notes, toc_entries = build_content_fragments(content, id_map, toc_levels, cfg)
 
-    write_epub_files(body_fragments, notes, toc_entries)
-    validate_xml()
-    create_epub()
+    write_epub_files(body_fragments, notes, toc_entries, cfg)
+    validate_xml(cfg)
+    create_epub(cfg)
 
-    print(f"Wrote {OUTPUT_EPUB}")
+    print(f"Wrote {cfg.output_epub}")
     print(f"Body fragments: {len(body_fragments)}")
     print(f"Notes: {len(notes)}")
     print(f"TOC entries: {len(toc_entries)}")
