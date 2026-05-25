@@ -335,30 +335,33 @@ def draw_centered_lines(
 
 
 def create_cover(path: Path, cfg: Config) -> None:
-    width, height = 1600, 2400
+    # 800×1200 (960 000 px) fits within the crosspoint-reader firmware limit of
+    # MAX_SOURCE_PIXELS = 3 145 728 (2048×1536). The original 1600×2400 = 3 840 000
+    # exceeds that limit and causes the decoder to silently reject the image.
+    width, height = 800, 1200
     image = Image.new("RGB", (width, height), "#f7f1e6")
     draw = ImageDraw.Draw(image)
     burgundy = "#6d1726"
     graphite = "#262626"
     gold = "#b9965d"
 
-    margin = 110
-    draw.rectangle((margin, margin, width - margin, height - margin), outline=burgundy, width=8)
-    draw.rectangle((margin + 32, margin + 32, width - margin - 32, height - margin - 32), outline=gold, width=3)
+    margin = 55
+    draw.rectangle((margin, margin, width - margin, height - margin), outline=burgundy, width=4)
+    draw.rectangle((margin + 16, margin + 16, width - margin - 16, height - margin - 16), outline=gold, width=2)
 
-    y = 360
-    y = draw_centered_lines(draw, [cfg.cover_label.upper()], font(54), y, graphite, 18, width)
-    y += 120
-    y = draw_centered_lines(draw, ["MAGNIFICA", "HUMANITAS"], font(126, bold=True), y, burgundy, 34, width)
-    y += 120
-    subtitle_lines = wrap_text(draw, cfg.subtitle.upper(), font(48), width - 360)
-    y = draw_centered_lines(draw, subtitle_lines, font(48), y, graphite, 22, width)
-    y += 190
-    draw.line((width // 2 - 210, y, width // 2 + 210, y), fill=gold, width=6)
-    y += 110
-    y = draw_centered_lines(draw, [cfg.author.upper()], font(58, bold=True), y, graphite, 18, width)
-    y += 48
-    draw_centered_lines(draw, [cfg.cover_date.upper()], font(44), y, graphite, 14, width)
+    y = 180
+    y = draw_centered_lines(draw, [cfg.cover_label.upper()], font(27), y, graphite, 9, width)
+    y += 60
+    y = draw_centered_lines(draw, ["MAGNIFICA", "HUMANITAS"], font(63, bold=True), y, burgundy, 17, width)
+    y += 60
+    subtitle_lines = wrap_text(draw, cfg.subtitle.upper(), font(24), width - 180)
+    y = draw_centered_lines(draw, subtitle_lines, font(24), y, graphite, 11, width)
+    y += 95
+    draw.line((width // 2 - 105, y, width // 2 + 105, y), fill=gold, width=3)
+    y += 55
+    y = draw_centered_lines(draw, [cfg.author.upper()], font(29, bold=True), y, graphite, 9, width)
+    y += 24
+    draw_centered_lines(draw, [cfg.cover_date.upper()], font(22), y, graphite, 7, width)
 
     image.save(path, "PNG", optimize=True)
 
